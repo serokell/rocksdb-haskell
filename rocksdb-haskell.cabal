@@ -40,7 +40,6 @@ library
                   , RecordWildCards
 
   build-depends:    base >= 3 && < 5
-                  , binary
                   , bytestring
                   , data-default
                   , filepath
