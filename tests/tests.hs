@@ -43,7 +43,6 @@ main =  hspec $ do
     it "should put items into the database and retrieve them" $  do
       runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
         db <- initializeDB path
-
         put db def "zzz" "zzz"
         get db def "zzz"
       `shouldReturn` (Just "zzz")
@@ -51,9 +50,8 @@ main =  hspec $ do
     it "should put items into a database whose filepath has unicode characters and\
        \ retrieve them" $  do
       runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
-        unicode <- liftIO $ generate arbitrary
-        db <- initializeDB $ getHardString unicode ++ path
-
+        unicode <- getHardString <$> liftIO (generate arbitrary)
+        db <- initializeDB $ path ++ unicode
         put db def "zzz" "zzz"
         get db def "zzz"
       `shouldReturn` (Just "zzz")

@@ -91,10 +91,8 @@ import           Database.RocksDB.Types
 import qualified Data.ByteString              as BS
 import qualified Data.ByteString.Unsafe       as BU
 
-#ifndef mingw32_HOST_OS
 import qualified GHC.Foreign                  as GHC
 import qualified GHC.IO.Encoding              as GHC
-#endif
 
 -- | Create a 'BloomFilter'
 bloomFilter :: MonadResource m => Int -> m BloomFilter
@@ -342,8 +340,4 @@ bsToBinary :: Binary v => ByteString -> v
 bsToBinary x = Binary.decode (BSL.fromStrict x)
 
 withFilePath :: FilePath -> (CString -> IO a) -> IO a
-# ifdef mingw32_HOST_OS
-withFilePath = withCString
-# else
 withFilePath = GHC.withCString GHC.utf8
-# endif
