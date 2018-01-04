@@ -133,6 +133,13 @@ createSnapshotBracket db = allocate (createSnapshot db) (releaseSnapshot db)
 -- | Open a database.
 --
 -- The returned handle should be released with 'close'.
+--
+-- This function is not async-exception-safe.
+-- If interrupted by an async exceptions, the resources acquired
+-- by this function will memory-leak.
+-- Thus it should be used only within `bracket` or a similar function
+-- so that a finalizer calling `close` can be attached while async
+-- exceptions are disabled.
 open :: MonadIO m => FilePath -> Options -> m DB
 open path opts = liftIO $ bracketOnError initialize finalize mkDB
     where
