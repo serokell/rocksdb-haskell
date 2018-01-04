@@ -177,6 +177,10 @@ open path opts = liftIO $ bracketOnError initialize finalize mkDB
 --
 -- The handle will be invalid after calling this action and should no
 -- longer be used.
+-- If it is used, with the current implementation of RocksDB,
+-- the program will SEGFAULT.
+-- If another RocksDB operation is still running in another thread while
+-- close() is function is called, this may results in crashes or data loss.
 close :: MonadIO m => DB -> m ()
 close (DB db_ptr opts_ptr) = liftIO $
     c_rocksdb_close db_ptr `finally` freeOpts opts_ptr
