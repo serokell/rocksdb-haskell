@@ -3,6 +3,8 @@
 
 module Main where
 
+import           Control.Concurrent           (threadDelay)
+import           Control.Concurrent.Async     (race_)
 import           Control.Monad                (when)
 import           Control.Monad.IO.Class       (MonadIO (liftIO))
 import           Control.Monad.Trans.Resource (runResourceT)
@@ -76,3 +78,25 @@ main =  hspec $ do
         close db
         return val
       `shouldReturn` (Just "zzz")
+
+  describe "multi-thread crash checks" $ do
+
+    it "should not segfault on use-after-close" $ do
+      withSystemTempDirectory "rocksdb" $ \path -> do
+        db <-
+          open
+            path
+            defaultOptions
+            {createIfMissing = True, compression = NoCompression}
+
+        race_
+          (do
+            put db def "key" "value1"
+            close db
+            threadDelay 2000000
+          )
+          (do
+            threadDelay 1000000
+            put db def "key" "value2"
+            close db
+          )

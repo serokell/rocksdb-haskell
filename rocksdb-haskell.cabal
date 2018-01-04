@@ -64,6 +64,7 @@ test-suite rocksdb-tests
                      , hspec >= 1.8
                      , process >= 1.1.0.2
                      , bytestring >= 0.10.4.0
+                     , async
                      , data-default
                      , filepath
                      , resourcet
