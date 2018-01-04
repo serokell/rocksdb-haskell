@@ -6,6 +6,7 @@ module Main where
 import           Control.Monad.IO.Class       (MonadIO (liftIO))
 import           Control.Monad.Trans.Resource (MonadResource, runResourceT)
 import           Data.Default                 (def)
+import           System.FilePath              ((</>))
 import           System.IO.Temp               (withSystemTempDirectory)
 
 import           Database.RocksDB             (Compression (..), DB, compression,
@@ -38,7 +39,7 @@ main =  hspec $ do
        \ retrieve them" $  do
       runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
         unicode <- getUnicodeString <$> liftIO (generate arbitrary)
-        db <- initializeDB $ path ++ unicode
+        db <- initializeDB $ path </> "unicode-randomdir-" ++ unicode
         put db def "zzz" "zzz"
         get db def "zzz"
       `shouldReturn` (Just "zzz")

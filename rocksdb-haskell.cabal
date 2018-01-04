@@ -65,6 +65,7 @@ test-suite rocksdb-tests
                      , process >= 1.1.0.2
                      , bytestring >= 0.10.4.0
                      , data-default
+                     , filepath
                      , resourcet
                      , transformers
                      , temporary
