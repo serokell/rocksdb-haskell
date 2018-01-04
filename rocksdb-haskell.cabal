@@ -71,4 +71,5 @@ test-suite rocksdb-tests
                      , temporary
                      , hspec-expectations
                      , QuickCheck
+                     , directory
   default-language:    Haskell2010
