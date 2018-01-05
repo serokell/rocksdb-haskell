@@ -97,14 +97,13 @@ iterOpenBracket db opts = allocate (createIter db opts) releaseIter
 -- updates written after the iterator was created are not visible. You may,
 -- however, specify an older 'Snapshot' in the 'ReadOptions'.
 createIter :: MonadIO m => DB -> ReadOptions -> m Iterator
-createIter db@DB{ db_fptr } opts = liftIO $ do
+createIter db@DB{ db_ptr } opts = liftIO $ do
     ensureOpen db
     opts_ptr <- mkCReadOpts opts
-    withForeignPtr db_fptr $ \db_ptr -> do
-        flip onException (freeCReadOpts opts_ptr) $ do
-            iter_ptr <- throwErrnoIfNull "create_iterator" $
-                            c_rocksdb_create_iterator db_ptr opts_ptr
-            return $ Iterator iter_ptr opts_ptr
+    flip onException (freeCReadOpts opts_ptr) $ do
+        iter_ptr <- throwErrnoIfNull "create_iterator" $
+                        c_rocksdb_create_iterator db_ptr opts_ptr
+        return $ Iterator iter_ptr opts_ptr
 
 -- | Release an 'Iterator'.
 --

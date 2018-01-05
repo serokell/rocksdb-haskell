@@ -99,14 +99,13 @@ data DBHandleStatus
 -- via the `db->...` pointer in the RocksDB implementation will be invalid
 -- (see e.g. https://github.com/facebook/rocksdb/blob/75d57a5d538/db/c.cc#L736).
 data DB = DB
-    { db_fptr :: ForeignPtr RocksDB
+    { db_ptr :: RocksDBPtr
     , dbOptions :: Options'
     , dbHandleStatusRef :: IORef DBHandleStatus
-    , dbAutoclose :: Bool
     }
 
 instance Eq DB where
-    (DB pt1 _ _ _) == (DB pt2 _ _ _) = pt1 == pt2
+    (DB pt1 _ _) == (DB pt2 _ _) = pt1 == pt2
 
 -- | Internal representation of a 'Comparator'
 data Comparator' = Comparator' (FunPtr CompareFun)

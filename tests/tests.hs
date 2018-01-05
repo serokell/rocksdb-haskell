@@ -16,8 +16,8 @@ import           System.IO.Error              (ioeGetErrorType, isUserErrorType,
 import           System.IO.Temp               (withSystemTempDirectory)
 
 import           Database.RocksDB             (Compression (..), Options (..),
-                                               createIfMissing, defaultOptions, get, withDB, open, openBracket, openAutoclose,
-                                               put, close, finalize)
+                                               createIfMissing, defaultOptions, get, withDB, open, openBracket,
+                                               put, close)
 
 import           Test.Hspec                   (describe, hspec, it, shouldReturn, shouldThrow)
 import           Test.QuickCheck              (Arbitrary (..), UnicodeString (..),
@@ -41,7 +41,7 @@ main =  hspec $ do
           return val
       `shouldReturn` (Just "zzz")
 
-    it "should put items into the database and retrieve them (non-asysnc-safe way)" $ do
+    it "should put items into the database and retrieve them (non-async-safe way)" $ do
       withSystemTempDirectory "rocksdb" $ \path -> do
         db <- open path testOpenOptions
         put db def "zzz" "zzz"
@@ -59,21 +59,6 @@ main =  hspec $ do
         return val
       `shouldReturn` (Just "zzz")
 
-    it "should put items into the database and retrieve them (autoclose way)" $ do
-      -- [Note: Unique tmp dirs for autoclose without finalize]
-      -- We need to use a different temp dir prefix here that we don't reuse
-      -- anywhere else, because the GC can delay `close`ing the DB for
-      -- arbitrarily long, and RocksDB has a lock check that would make
-      -- using this directory again fail before `close` is called;
-      -- so later tests using the same dir would fail.
-      -- See comment on `openAutoclose`.
-      withSystemTempDirectory "rocksdb-autoclose-uniquedir1" $ \path -> do
-        db <- openAutoclose path testOpenOptions
-        put db def "zzz" "zzz"
-        val <- get db def "zzz"
-        return val
-      `shouldReturn` (Just "zzz")
-
     it "does weird global singleton string matching stuff for double-locking warnings" $ do
       -- This test will fail when RocksDB fixes this issue
       -- (see https://stackoverflow.com/questions/37310588/rocksdb-io-error-lock-no-locks-available#comment83145041_37312033).
@@ -85,23 +70,23 @@ main =  hspec $ do
 
       createDirectoryIfMissing True path
 
+      db <- open path testOpenOptions
       (do
-        db <- open path testOpenOptions
         put db def "zzz" "zzz"
         get db def "zzz") `shouldReturn` (Just "zzz")
       -- We purposely don't `close` the DB above.
 
       removeDirectoryRecursive path
 
-      (do
-        db <- open path testOpenOptions
-        put db def "zzz" "zzz"
-        get db def "zzz") `shouldThrow` \ioe ->
-          isUserErrorType (ioeGetErrorType ioe) &&
-          ioeGetErrorString ioe `elem`
-            [ "open: IO error: lock " ++ path ++ "/LOCK: No locks available"
-            , "open: IO error: While lock file: " ++ path ++ "/LOCK: No locks available"
-            ]
+      open path testOpenOptions `shouldThrow` \ioe ->
+        isUserErrorType (ioeGetErrorType ioe) &&
+        ioeGetErrorString ioe `elem`
+          [ "open: IO error: lock " ++ path ++ "/LOCK: No locks available"
+          , "open: IO error: While lock file: " ++ path ++ "/LOCK: No locks available"
+          ]
+
+      -- Close first DB now so that it doesn't memory-leak.
+      close db
 
     it "should put items into a database whose filepath has unicode characters and\
        \ retrieve them" $ do
@@ -123,23 +108,6 @@ main =  hspec $ do
           close db
           return val
       `shouldThrow` (\(ErrorCall str) -> str == "haskell-rocksdb ensureOpenAndClose: Caller BUG: DB is closed")
-
-    it "should detect manual close after openAutoclose" $ do
-      -- See Note "Unique tmp dirs for autoclose without finalize".
-      withSystemTempDirectory "rocksdb-autoclose-uniquedir2" $ \path -> do
-        db <- openAutoclose path testOpenOptions
-        put db def "zzz" "zzz"
-        val <- get db def "zzz"
-        close db
-        return val
-      `shouldThrow` (\(ErrorCall str) -> str == "haskell-rocksdb close: Caller BUG: DB opened with 'openAutoclose' must not be closed manually")
-
-    it "should not trigger after orderly manual finalize" $ do
-      withSystemTempDirectory "rocksdb" $ \path -> do
-        db <- openAutoclose path testOpenOptions
-        put db def "zzz" "zzz"
-        _val <- get db def "zzz"
-        finalize db :: IO ()
 
   describe "multi-thread crash checks" $ do
 
