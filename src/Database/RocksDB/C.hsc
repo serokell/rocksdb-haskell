@@ -67,6 +67,9 @@ foreign import ccall safe "rocksdb\\c.h rocksdb_open"
 foreign import ccall safe "rocksdb\\c.h rocksdb_close"
   c_rocksdb_close :: RocksDBPtr -> IO ()
 
+foreign import ccall safe "rocksdb\\c.h &rocksdb_close"
+  c_rocksdb_close_funptr :: FunPtr (RocksDBPtr -> IO ())
+
 
 foreign import ccall safe "rocksdb\\c.h rocksdb_put"
   c_rocksdb_put :: RocksDBPtr

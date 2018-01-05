@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 -- |
 -- Module      : Database.RocksDB.Internal
@@ -12,9 +13,14 @@
 module Database.RocksDB.Internal
     ( -- * Types
       DB (..)
+    , DBHandleStatus(..)
     , Comparator'
     , FilterPolicy'
     , Options' (..)
+
+    -- * Checks
+    , ensureOpen
+    , ensureOpenAndClose
 
     -- * "Smart" constructors and deconstructors
     , freeCReadOpts
@@ -48,9 +54,11 @@ import           Control.Applicative    ((<$>))
 import           Control.Exception      (bracket, onException, throwIO)
 import           Control.Monad          (when)
 import           Data.ByteString        (ByteString)
+import           Data.IORef             (IORef, readIORef, atomicModifyIORef')
 import           Foreign
 import           Foreign.C.String       (CString, peekCString, withCString)
 import           Foreign.C.Types        (CInt, CSize)
+import           GHC.Stack              (HasCallStack)
 
 import           Database.RocksDB.C
 import           Database.RocksDB.Types
@@ -58,11 +66,47 @@ import           Database.RocksDB.Types
 import qualified Data.ByteString        as BS
 
 
+
+data DBHandleStatus
+    = Open
+    | Closed
+    deriving (Eq, Ord, Show)
+
 -- | Database handle
-data DB = DB RocksDBPtr Options'
+--
+-- The `DBHandleStatus` allows to do some basic checks against
+-- double-`rocksdb_close()`s and calls to RocksDB functions after
+-- closing the DB, all of which segfault or corrupt memory, so that
+-- we have some chance to crash with a better error message in those
+-- cases.
+--
+-- Note this is only a chance, not reliable, because if `rocksdb_close()`
+-- is called from one thread while another `rocksdb_*` operation is still
+-- in progress from a different thread, all bets are off.
+-- We could reliably guard against this only by putting a mutex/atomics
+-- guarded reference counter increment/decrement around all `rocksdb_*()`
+-- functions and have `close` block until the count is zero, but
+-- that work has not been started yet and some performance measurements
+-- should be done first to ensure it doesn't slow things down.
+-- Until then, we use the heuristic of checking the DBHandleStatus
+-- non-atomically to guard against the roughest programmer mistakes.
+--
+-- Background:
+--
+-- The segfault is because `rocksdb_open()` returns a raw pointer,
+-- and that raw pointer is `delete`d by `rocksdb_free()`.
+-- So a second `rocksdb_close()` will double-free, and any dereference
+-- via the `db->...` pointer in the RocksDB implementation will be invalid
+-- (see e.g. https://github.com/facebook/rocksdb/blob/75d57a5d538/db/c.cc#L736).
+data DB = DB
+    { db_fptr :: ForeignPtr RocksDB
+    , dbOptions :: Options'
+    , dbHandleStatusRef :: IORef DBHandleStatus
+    , dbAutoclose :: Bool
+    }
 
 instance Eq DB where
-    (DB pt1 _) == (DB pt2 _) = pt1 == pt2
+    (DB pt1 _ _ _) == (DB pt2 _ _ _) = pt1 == pt2
 
 -- | Internal representation of a 'Comparator'
 data Comparator' = Comparator' (FunPtr CompareFun)
@@ -84,6 +128,18 @@ data Options' = Options'
     , _comp     :: !(Maybe Comparator')
     }
 
+ensureOpen :: (HasCallStack) => DB -> IO ()
+ensureOpen DB{ dbHandleStatusRef } = do
+    dbHandleStatus <- readIORef dbHandleStatusRef
+    when (dbHandleStatus /= Open) $
+        error "haskell-rocksdb ensureOpen: Caller BUG: DB is closed"
+
+ensureOpenAndClose :: (HasCallStack) => DB -> IO ()
+ensureOpenAndClose DB{ dbHandleStatusRef } = do
+    atomicModifyIORef' dbHandleStatusRef $ \status -> case status of
+        Open -> (Closed, ())
+        Closed ->
+            error "haskell-rocksdb ensureOpenAndClose: Caller BUG: DB is closed"
 
 mkOpts :: Options -> IO Options'
 mkOpts Options{..} = do
