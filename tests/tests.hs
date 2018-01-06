@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE BinaryLiterals      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 
@@ -59,6 +60,9 @@ main =  hspec $ do
         return val
       `shouldReturn` (Just "zzz")
 
+    -- This test doesn't apply to Windows because there we can't delete the
+    -- directory while a file in it is open.
+#if !defined(mingw32_HOST_OS)
     it "does weird global singleton string matching stuff for double-locking warnings" $ do
       -- This test will fail when RocksDB fixes this issue
       -- (see https://stackoverflow.com/questions/37310588/rocksdb-io-error-lock-no-locks-available#comment83145041_37312033).
@@ -87,9 +91,9 @@ main =  hspec $ do
 
       -- Close first DB now so that it doesn't memory-leak.
       close db
+#endif
 
-    it "should put items into a database whose filepath has unicode characters and\
-       \ retrieve them" $ do
+    it "should put items into a database whose filepath has unicode characters and retrieve them" $ do
       runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
         unicode <- getUnicodeString <$> liftIO (generate arbitrary)
         (_, db) <- openBracket (path </> "unicode-randomdir-" ++ unicode) testOpenOptions
