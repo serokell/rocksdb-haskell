@@ -6,10 +6,10 @@ module Main where
 
 import           Control.Concurrent           (threadDelay)
 import           Control.Concurrent.Async     (race_)
-import           Control.Exception            (ErrorCall(..))
+import           Control.Exception            (ErrorCall(..), fromException)
 import           Control.Monad                (when)
 import           Control.Monad.IO.Class       (MonadIO (liftIO))
-import           Control.Monad.Trans.Resource (runResourceT)
+import           Control.Monad.Trans.Resource (runResourceTChecked, allocate, ResourceCleanupException(..))
 import           Data.Default                 (def)
 import           System.Directory             (createDirectoryIfMissing, doesDirectoryExist, removeDirectoryRecursive)
 import           System.FilePath              ((</>))
@@ -32,6 +32,20 @@ testOpenOptions =
 main :: IO ()
 main =  hspec $ do
 
+  describe "Underlying library behaviour" $ do
+
+    it "runResourceTChecked doesn't ignore errors in finalizers" $ do
+      -- Added to `resourcet` so that our use case here is satisfied:
+      --   https://github.com/snoyberg/conduit/pull/347
+      runResourceTChecked $ do
+        _ <- allocate (return 'x') (\_x -> putStrLn "finalizer running" >> error "allocate finalizer fail")
+        return ()
+      `shouldThrow` \e -> case e of
+          ResourceCleanupException ex [] -> case fromException ex of
+            Just (ErrorCall "allocate finalizer fail") -> True
+            _ -> False
+          _ -> False
+
   describe "Basic DB Functionality" $ do
 
     it "should put items into the database and retrieve them (withDB way)" $ do
@@ -52,11 +66,10 @@ main =  hspec $ do
       `shouldReturn` (Just "zzz")
 
     it "should put items into the database and retrieve them (MonadResource way)" $ do
-      runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
+      runResourceTChecked $ withSystemTempDirectory "rocksdb" $ \path -> do
         (_, db) <- openBracket path testOpenOptions
         put db def "zzz" "zzz"
         val <- get db def "zzz"
-        close db -- TODO remove; this should make the test fail, but it doesn't because errors in finalizers run by runResourceT don't seem to bubble up
         return val
       `shouldReturn` (Just "zzz")
 
@@ -94,7 +107,7 @@ main =  hspec $ do
 #endif
 
     it "should put items into a database whose filepath has unicode characters and retrieve them" $ do
-      runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
+      runResourceTChecked $ withSystemTempDirectory "rocksdb" $ \path -> do
         unicode <- getUnicodeString <$> liftIO (generate arbitrary)
         (_, db) <- openBracket (path </> "unicode-randomdir-" ++ unicode) testOpenOptions
         put db def "zzz" "zzz"

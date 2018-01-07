@@ -107,15 +107,13 @@ bloomFilter i =
 -- | Open a database
 --
 -- The returned handle will automatically be released when the enclosing
--- 'runResourceT' terminates.
+-- 'runResourceTChecked' terminates.
+--
+-- Note that if you use `runResourceT` instead of `runResourceTChecked`,
+-- you won't get double-close detection.
 openBracket :: MonadResource m => FilePath -> Options -> m (ReleaseKey, DB)
 openBracket path opts = allocate (open path opts) close
 {-# INLINE openBracket #-}
--- Note that in the above, we don't get double-close detection
--- (see comment on `DB`), because apparently `runResourceT` swallows
--- any `error` that we may raise in the cleanup function given to
--- allocate. So if our double-close detection `error` triggers in
--- `close`, the user will not see it.
 
 -- | Run an action with a snapshot of the database.
 --
@@ -133,7 +131,7 @@ withSnapshotBracket db f = do
 -- | Create a snapshot of the database.
 --
 -- The returned 'Snapshot' will be released automatically when the enclosing
--- 'runResourceT' terminates. It is recommended to use 'createSnapshot'' instead
+-- 'runResourceTChecked' terminates. It is recommended to use 'createSnapshot'' instead
 -- and release the resource manually as soon as possible.
 -- Can be released early.
 createSnapshotBracket :: MonadResource m => DB -> m (ReleaseKey, Snapshot)

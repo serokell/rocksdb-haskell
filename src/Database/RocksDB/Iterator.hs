@@ -75,7 +75,7 @@ withIterator db opts f = do
 
 -- | Create an 'Iterator'.
 --
--- The iterator will be released when the enclosing 'runResourceT' terminates.
+-- The iterator will be released when the enclosing 'runResourceTChecked' terminates.
 -- You may consider to use 'iterOpen'' instead and manually release the iterator
 -- as soon as it is no longer needed (alternatively, use 'withIterator').
 --
