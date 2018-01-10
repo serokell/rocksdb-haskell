@@ -10,7 +10,7 @@ extra-deps:
                     #'UnicodeString' (2.10.1 is the first) is available in LTS.
 # Remove once https://github.com/snoyberg/conduit/pull/347 (1.1.11) is available in LTS
 - git: https://github.com/snoyberg/conduit.git
-  commit: fbfedcf48f30909cc22abd37b0220ba6fbbb5acf
+  commit: d90f4ddeec60022fa8070af58a8d1f6aa17c9f39
   subdirs:
   - resourcet
 
