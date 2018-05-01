@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP           #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TupleSections #-}
 
 -- |
@@ -34,6 +35,7 @@ module Database.RocksDB.Base
     , defaultWriteOptions
 
     -- * Basic Database Manipulations
+    , withDB
     , open
     , openBracket
     , close
@@ -83,8 +85,10 @@ import qualified Data.Binary                  as Binary
 import           Data.ByteString              (ByteString)
 import           Data.ByteString.Internal     (ByteString (..))
 import qualified Data.ByteString.Lazy         as BSL
+import           Data.IORef                   (newIORef)
 import           Foreign
 import           Foreign.C.String             (CString, withCString)
+import           GHC.Stack                    (HasCallStack)
 import           System.Directory             (createDirectoryIfMissing)
 
 import           Database.RocksDB.C
@@ -107,7 +111,10 @@ bloomFilter i =
 -- | Open a database
 --
 -- The returned handle will automatically be released when the enclosing
--- 'runResourceT' terminates.
+-- 'runResourceTChecked' terminates.
+--
+-- Note that if you use `runResourceT` instead of `runResourceTChecked`,
+-- you won't get double-close detection.
 openBracket :: MonadResource m => FilePath -> Options -> m (ReleaseKey, DB)
 openBracket path opts = allocate (open path opts) close
 {-# INLINE openBracket #-}
@@ -128,7 +135,7 @@ withSnapshotBracket db f = do
 -- | Create a snapshot of the database.
 --
 -- The returned 'Snapshot' will be released automatically when the enclosing
--- 'runResourceT' terminates. It is recommended to use 'createSnapshot'' instead
+-- 'runResourceTChecked' terminates. It is recommended to use 'createSnapshot'' instead
 -- and release the resource manually as soon as possible.
 -- Can be released early.
 createSnapshotBracket :: MonadResource m => DB -> m (ReleaseKey, Snapshot)
@@ -136,17 +143,25 @@ createSnapshotBracket db = allocate (createSnapshot db) (releaseSnapshot db)
 
 -- | Open a database.
 --
--- The returned handle should be released with 'close'.
-open :: MonadIO m => FilePath -> Options -> m DB
-open path opts = liftIO $ bracketOnError initialize finalize mkDB
+-- The returned handle must be released with 'close', or
+-- it will memory leak.
+--
+-- This function is not async-exception-safe.
+-- If interrupted by an async exceptions, the resources acquired
+-- by this function will memory-leak.
+-- Thus it should be used only within `bracket` or a similar function
+-- so that a finalizer calling `close` can be attached while async
+-- exceptions are disabled.
+open :: (HasCallStack, MonadIO m) => FilePath -> Options -> m DB
+open path opts = liftIO $ bracketOnError initializeOpts finalizeOpts mkDB
     where
 # ifdef mingw32_HOST_OS
-        initialize =
+        initializeOpts =
             (, ()) <$> mkOpts opts
-        finalize (opts', ()) =
+        finalizeOpts (opts', ()) =
             freeOpts opts'
 # else
-        initialize = do
+        initializeOpts = do
             opts' <- mkOpts opts
             -- With LC_ALL=C, two things happen:
             --   * rocksdb can't open a database with unicode in path;
@@ -158,50 +173,75 @@ open path opts = liftIO $ bracketOnError initialize finalize mkDB
             when (createIfMissing opts) $
                 GHC.setFileSystemEncoding GHC.utf8
             pure (opts', oldenc)
-        finalize (opts', oldenc) = do
+        finalizeOpts (opts', oldenc) = do
             freeOpts opts'
             GHC.setFileSystemEncoding oldenc
 # endif
         mkDB (opts'@(Options' opts_ptr _ _), _) = do
             when (createIfMissing opts) $
                 createDirectoryIfMissing True path
-            withFilePath path $ \path_ptr ->
-                liftM (`DB` opts')
-                $ throwIfErr "open"
-                $ c_rocksdb_open opts_ptr path_ptr
+            withFilePath path $ \path_ptr -> do
+                db_ptr <- throwIfErr "open" $ c_rocksdb_open opts_ptr path_ptr
+                statusRef <- newIORef Open
+                return $ DB
+                    { db_ptr
+                    , dbOptions = opts'
+                    , dbHandleStatusRef = statusRef
+                    }
+
+-- | The simplest and safest way to use a DB.
+--
+-- The DB is closed when this function returns.
+--
+-- You must not return the DB out of the inner scope.
+--
+-- You must not call `close` on the DB.
+withDB :: (HasCallStack) => FilePath -> Options -> (DB -> IO a) -> IO a
+withDB path opts f = do
+    bracket
+        (open path opts)
+        close
+        f
 
 -- | Close a database.
 --
 -- The handle will be invalid after calling this action and should no
 -- longer be used.
-close :: MonadIO m => DB -> m ()
-close (DB db_ptr opts_ptr) = liftIO $
-    c_rocksdb_close db_ptr `finally` freeOpts opts_ptr
-
+-- If it is used, with the current implementation of RocksDB,
+-- the program will SEGFAULT.
+-- If another RocksDB operation is still running in another thread while
+-- close() is function is called, this may results in crashes or data loss.
+close :: (MonadIO m, HasCallStack) => DB -> m ()
+close db@DB{ db_ptr, dbOptions } = liftIO $ do
+    ensureOpenAndClose db
+    c_rocksdb_close db_ptr `finally` freeOpts dbOptions
 
 -- | Run an action with a 'Snapshot' of the database.
-withSnapshot :: MonadIO m => DB -> (Snapshot -> IO a) -> m a
+withSnapshot :: (MonadIO m, HasCallStack) => DB -> (Snapshot -> IO a) -> m a
 withSnapshot db act = liftIO $
     bracket (createSnapshot db) (releaseSnapshot db) act
 
 -- | Create a snapshot of the database.
 --
 -- The returned 'Snapshot' should be released with 'releaseSnapshot'.
-createSnapshot :: MonadIO m => DB -> m Snapshot
-createSnapshot (DB db_ptr _) = liftIO $
+createSnapshot :: (MonadIO m, HasCallStack) => DB -> m Snapshot
+createSnapshot db@DB{ db_ptr } = liftIO $ do
+    ensureOpen db
     Snapshot <$> c_rocksdb_create_snapshot db_ptr
 
 -- | Release a snapshot.
 --
 -- The handle will be invalid after calling this action and should no
 -- longer be used.
-releaseSnapshot :: MonadIO m => DB -> Snapshot -> m ()
-releaseSnapshot (DB db_ptr _) (Snapshot snap) = liftIO $
+releaseSnapshot :: (MonadIO m, HasCallStack) => DB -> Snapshot -> m ()
+releaseSnapshot db@DB{ db_ptr } (Snapshot snap) = liftIO $ do
+    ensureOpen db
     c_rocksdb_release_snapshot db_ptr snap
 
 -- | Get a DB property.
-getProperty :: MonadIO m => DB -> Property -> m (Maybe ByteString)
-getProperty (DB db_ptr _) p = liftIO $
+getProperty :: (MonadIO m, HasCallStack) => DB -> Property -> m (Maybe ByteString)
+getProperty db@DB{ db_ptr } p = liftIO $ do
+    ensureOpen db
     withCString (prop p) $ \prop_ptr -> do
         val_ptr <- c_rocksdb_property_value db_ptr prop_ptr
         if val_ptr == nullPtr
@@ -235,20 +275,21 @@ repair path opts = liftIO $ bracket (mkOpts opts) freeOpts repair'
 type Range  = (ByteString, ByteString)
 
 -- | Inspect the approximate sizes of the different levels.
-approximateSize :: MonadIO m => DB -> Range -> m Int64
-approximateSize (DB db_ptr _) (from, to) = liftIO $
+approximateSize :: (MonadIO m, HasCallStack) => DB -> Range -> m Int64
+approximateSize db@DB{ db_ptr } (from, to) = liftIO $ do
+    ensureOpen db
     BU.unsafeUseAsCStringLen from $ \(from_ptr, flen) ->
-    BU.unsafeUseAsCStringLen to   $ \(to_ptr, tlen)   ->
-    withArray [from_ptr]          $ \from_ptrs        ->
-    withArray [intToCSize flen]   $ \flen_ptrs        ->
-    withArray [to_ptr]            $ \to_ptrs          ->
-    withArray [intToCSize tlen]   $ \tlen_ptrs        ->
-    allocaArray 1                 $ \size_ptrs        -> do
-        c_rocksdb_approximate_sizes db_ptr 1
-                                    from_ptrs flen_ptrs
-                                    to_ptrs tlen_ptrs
-                                    size_ptrs
-        liftM head $ peekArray 1 size_ptrs >>= mapM toInt64
+        BU.unsafeUseAsCStringLen to   $ \(to_ptr, tlen)   ->
+        withArray [from_ptr]          $ \from_ptrs        ->
+        withArray [intToCSize flen]   $ \flen_ptrs        ->
+        withArray [to_ptr]            $ \to_ptrs          ->
+        withArray [intToCSize tlen]   $ \tlen_ptrs        ->
+        allocaArray 1                 $ \size_ptrs        -> do
+            c_rocksdb_approximate_sizes db_ptr 1
+                                        from_ptrs flen_ptrs
+                                        to_ptrs tlen_ptrs
+                                        size_ptrs
+            liftM head $ peekArray 1 size_ptrs >>= mapM toInt64
 
     where
         toInt64 = return . fromIntegral
@@ -260,14 +301,15 @@ putBinary :: (MonadIO m, Binary k, Binary v) => DB -> WriteOptions -> k -> v -> 
 putBinary db wopts key val = put db wopts (binaryToBS key) (binaryToBS val)
 
 -- | Write a key/value pair.
-put :: MonadIO m => DB -> WriteOptions -> ByteString -> ByteString -> m ()
-put (DB db_ptr _) opts key value = liftIO $ withCWriteOpts opts $ \opts_ptr ->
+put :: (MonadIO m, HasCallStack) => DB -> WriteOptions -> ByteString -> ByteString -> m ()
+put db@DB{ db_ptr } opts key value = liftIO $ withCWriteOpts opts $ \opts_ptr -> do
+    ensureOpen db
     BU.unsafeUseAsCStringLen key   $ \(key_ptr, klen) ->
-    BU.unsafeUseAsCStringLen value $ \(val_ptr, vlen) ->
-        throwIfErr "put"
-            $ c_rocksdb_put db_ptr opts_ptr
-                            key_ptr (intToCSize klen)
-                            val_ptr (intToCSize vlen)
+        BU.unsafeUseAsCStringLen value $ \(val_ptr, vlen) ->
+            throwIfErr "put"
+                $ c_rocksdb_put db_ptr opts_ptr
+                                key_ptr (intToCSize klen)
+                                val_ptr (intToCSize vlen)
 
 getBinaryVal :: (Binary v, MonadIO m) => DB -> ReadOptions -> ByteString -> m (Maybe v)
 getBinaryVal db ropts key  = fmap bsToBinary <$> get db ropts key
@@ -276,35 +318,38 @@ getBinary :: (MonadIO m, Binary k, Binary v) => DB -> ReadOptions -> k -> m (May
 getBinary db ropts key = fmap bsToBinary <$> get db ropts (binaryToBS key)
 
 -- | Read a value by key.
-get :: MonadIO m => DB -> ReadOptions -> ByteString -> m (Maybe ByteString)
-get (DB db_ptr _) opts key = liftIO $ withCReadOpts opts $ \opts_ptr ->
+get :: (MonadIO m, HasCallStack) => DB -> ReadOptions -> ByteString -> m (Maybe ByteString)
+get db@DB{ db_ptr } opts key = liftIO $ withCReadOpts opts $ \opts_ptr -> do
+    ensureOpen db
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
-    alloca                       $ \vlen_ptr -> do
-        val_ptr <- throwIfErr "get" $
-            c_rocksdb_get db_ptr opts_ptr key_ptr (intToCSize klen) vlen_ptr
-        vlen <- peek vlen_ptr
-        if val_ptr == nullPtr
-            then return Nothing
-            else do
-                res' <- Just <$> BS.packCStringLen (val_ptr, cSizeToInt vlen)
-                freeCString val_ptr
-                return res'
+        alloca                       $ \vlen_ptr -> do
+            val_ptr <- throwIfErr "get" $
+                c_rocksdb_get db_ptr opts_ptr key_ptr (intToCSize klen) vlen_ptr
+            vlen <- peek vlen_ptr
+            if val_ptr == nullPtr
+                then return Nothing
+                else do
+                    res' <- Just <$> BS.packCStringLen (val_ptr, cSizeToInt vlen)
+                    freeCString val_ptr
+                    return res'
 
 -- | Delete a key/value pair.
-delete :: MonadIO m => DB -> WriteOptions -> ByteString -> m ()
-delete (DB db_ptr _) opts key = liftIO $ withCWriteOpts opts $ \opts_ptr ->
+delete :: (MonadIO m, HasCallStack) => DB -> WriteOptions -> ByteString -> m ()
+delete db@DB{ db_ptr } opts key = liftIO $ withCWriteOpts opts $ \opts_ptr -> do
+    ensureOpen db
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
         throwIfErr "delete"
             $ c_rocksdb_delete db_ptr opts_ptr key_ptr (intToCSize klen)
 
 -- | Perform a batch mutation.
-write :: MonadIO m => DB -> WriteOptions -> WriteBatch -> m ()
-write (DB db_ptr _) opts batch = liftIO $ withCWriteOpts opts $ \opts_ptr ->
+write :: (MonadIO m, HasCallStack) => DB -> WriteOptions -> WriteBatch -> m ()
+write db@DB{ db_ptr } opts batch = liftIO $ withCWriteOpts opts $ \opts_ptr -> do
+    ensureOpen db
     bracket c_rocksdb_writebatch_create c_rocksdb_writebatch_destroy $ \batch_ptr -> do
 
-    mapM_ (batchAdd batch_ptr) batch
+        mapM_ (batchAdd batch_ptr) batch
 
-    throwIfErr "write" $ c_rocksdb_write db_ptr opts_ptr batch_ptr
+        throwIfErr "write" $ c_rocksdb_write db_ptr opts_ptr batch_ptr
 
     -- ensure @ByteString@s (and respective shared @CStringLen@s) aren't GC'ed
     -- until here

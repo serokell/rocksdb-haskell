@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 -- |
 -- Module      : Database.RocksDB.Iterator
 -- Copyright   : (c) 2012-2013 The leveldb-haskell Authors
@@ -74,7 +75,7 @@ withIterator db opts f = do
 
 -- | Create an 'Iterator'.
 --
--- The iterator will be released when the enclosing 'runResourceT' terminates.
+-- The iterator will be released when the enclosing 'runResourceTChecked' terminates.
 -- You may consider to use 'iterOpen'' instead and manually release the iterator
 -- as soon as it is no longer needed (alternatively, use 'withIterator').
 --
@@ -96,7 +97,8 @@ iterOpenBracket db opts = allocate (createIter db opts) releaseIter
 -- updates written after the iterator was created are not visible. You may,
 -- however, specify an older 'Snapshot' in the 'ReadOptions'.
 createIter :: MonadIO m => DB -> ReadOptions -> m Iterator
-createIter (DB db_ptr _) opts = liftIO $ do
+createIter db@DB{ db_ptr } opts = liftIO $ do
+    ensureOpen db
     opts_ptr <- mkCReadOpts opts
     flip onException (freeCReadOpts opts_ptr) $ do
         iter_ptr <- throwErrnoIfNull "create_iterator" $
